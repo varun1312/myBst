@@ -87,6 +87,9 @@ void find(int key, NodeLocation *nodeLoc, Node *startNode, Node *_ancNode, int *
 	nodeLoc->curr = curr;	
 }
 
+bool markChildNode(Node *, int , int , bool , int );
+bool removeNode(Node *, Node *, int);
+
 bool insert(int key, NodeLocation *nodeLoc) {
 	find(key, nodeLoc, root, root, root->keyPtr);
 	Node *pred = nodeLoc->pred;
@@ -94,19 +97,37 @@ bool insert(int key, NodeLocation *nodeLoc) {
 	bool n = ISNULL(curr);
 	if (n == true) {
 		int predKey = GETKEY(GETADDR(pred)->keyPtr);
-		Node *myNode = (Node *)malloc(sizeof(Node));
-		myNode->keyPtr = (int *)malloc(sizeof(int));
-		*(myNode->keyPtr) = key;
-		myNode->child[LEFT] = (Node *)0x04;
-		myNode->child[RIGHT] = (Node *)0x04;
-		myNode->bl = pred;
-		if (key > predKey)
-			pred->child[RIGHT] = myNode;
-		else
-			pred->child[LEFT] = myNode;
+		int lr = key > predKey ? RIGHT : LEFT;
+		int predStat = STATUS(pred->child[lr]);
+		if (predStat == NORMAL || predStat == REPLACE) {
+			Node *myNode = (Node *)malloc(sizeof(Node));
+			myNode->keyPtr = (int *)malloc(sizeof(int));
+			*(myNode->keyPtr) = key;
+			myNode->child[LEFT] = (Node *)0x04;
+			myNode->child[RIGHT] = (Node *)0x04;
+			myNode->bl = pred;
+
+			if (CAS(&(pred->child[lr]), curr, true, predStat, myNode, false, NORMAL)) {
+				return true;
+			}
+			else
+				return insert(key, nodeLoc);
+		}	
+		else if ((predStat == MARKED) || (predStat == PROMOTE)) {
+			markChildNode(pred, 1-lr, MARKED, true, predKey);
+			removeNode(pred->bl, pred, predKey);
+			return insert(key, nodeLoc);
+		}
 	}
-	else
-		return false;
+	else {
+		int *currKeyPtr = GETADDR(curr)->keyPtr;
+		int currKey = GETKEY(currKeyPtr);
+		if (key != currKey) {
+			return insert(key, nodeLoc);
+		}
+		else
+			return false;
+	} 
 }
 
 bool markChildNode(Node *node, int lr, int status, bool markNullOnly, int key) {
@@ -379,13 +400,22 @@ void testbench() {
 	int arr[numThreads];
   	//pthread_t remT[numThreads];
 	std::vector<std::thread> remT(numThreads);
+	std::vector<std::thread> insT(numThreads);
 	for (int i = 0; i < numThreads; i++) { 
 		do {
 			arr[i] = rand();
 		} while(arr[i] == INT_MAX);
 	}
-	for (int i = 0; i < numThreads; i++) 
-		insert(arr[i], nodeLoc);
+	NodeLocation **insLoc = (NodeLocation **)malloc(numThreads * sizeof(NodeLocation*));
+	for(int i=0;i<numThreads;i++) {
+		insLoc[i] = (NodeLocation *)malloc(sizeof(NodeLocation));
+	}
+	for(int i=0;i<numThreads;i++)
+		insT[i] = std::thread(&insert, arr[i], insLoc[i]); 
+	for(int i=0;i<numThreads;i++)
+		insT[i].join(); 
+//	for (int i = 0; i < numThreads; i++) 
+//		insert(arr[i], nodeLoc);
 //	for (int i = 0; i < numThreads; i++) 
 //		remove(arr[i], nodeLoc, root, root);
 	NodeLocation **remLoc = (NodeLocation **)malloc(numThreads * sizeof(NodeLocation*));
