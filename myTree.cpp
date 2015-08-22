@@ -3,13 +3,18 @@
 #include <limits.h>
 #include <stdint.h> 
 #include <time.h>
-//#include <pthread.h>
+#include <pthread.h>
 #include <vector>
 #include <thread>
+#include <gsl/gsl_rng.h>
+#include <gsl/gsl_randist.h>
+#include <unistd.h>
 
 const int LEFT = 0, RIGHT  = 1;
 const int NORMAL = 0, MARKED = 1, PROMOTE = 2, REPLACE = 3;
 const int DNORMAL = 0, DMARKED = 1;
+
+volatile bool start = false, steadyState = false, stop = false;
 
 #define ISNULL(node) (bool)((uintptr_t)node & 0x04)
 #define GETADDR(node) ((Node *)((uintptr_t)node & ~0x07))
@@ -21,6 +26,25 @@ const int DNORMAL = 0, DMARKED = 1;
 	__sync_bool_compare_and_swap(ptr, markNode(s, sn, ss), markNode(t, tn, ts))
 #define DCAS(ptr, s, ss, t, ts) \
 	__sync_bool_compare_and_swap(ptr, (((uintptr_t)s & ~0x01) | ss), (((uintptr_t)t & ~0x01) | ts)) 
+
+#define DEFAULT_DURATION 2
+#define DEFAULT_DATA_SIZE 256
+#define DEFAULT_THREADS 1
+#define DEFAULT_RANGE 0x7FFFFFFF
+#define DEFAULT_SEED 0
+#define DEFAULT_INSERT 20
+#define DEFAULT_REMOVE 10
+#define DEFAULT_SEARCH 70
+
+int duration = DEFAULT_DURATION;
+int dataSize = DEFAULT_DATA_SIZE;
+int numThreads = DEFAULT_THREADS;
+int range = DEFAULT_RANGE;
+unsigned int seed = DEFAULT_SEED;
+int insertPer = DEFAULT_INSERT;
+int removePer = DEFAULT_REMOVE;
+int searchPer = DEFAULT_SEARCH;
+int initialSize = ((dataSize)/2);
 
 struct Node {
 	Node *bl;
@@ -36,6 +60,13 @@ struct NodeLocation {
 	Node *curr;
 	int *ancKeyPtr;
 	
+	Node *newNode;
+	bool isNewNodeAvailable;
+	unsigned long insertCount;
+	unsigned long deleteCount;
+	unsigned long searchCount;
+	int tid;
+	unsigned long lseed;	
 	NodeLocation(Node *ancNode, Node *pred, Node *curr, int *ancKeyPtr) {
 		this->ancNode = ancNode;
 		this->pred = pred;
@@ -90,7 +121,23 @@ void find(int key, NodeLocation *nodeLoc, Node *startNode, Node *_ancNode, int *
 bool markChildNode(Node *, int , int , bool , int );
 bool removeNode(Node *, Node *, int);
 
-bool insert(int key, NodeLocation *nodeLoc) {
+bool searchTree(int key, NodeLocation *nodeLoc) {
+	find(key, nodeLoc, root, root, root->keyPtr);
+	Node *curr = nodeLoc->curr;
+	bool n = ISNULL(curr);
+	if (n == true) {
+		return false;
+	}
+	else {
+		int *currKeyPtr = GETADDR(curr)->keyPtr;
+		int currKey = GETKEY(currKeyPtr);
+		if (key == currKey)
+			return true;
+		return false;
+	}
+}
+
+bool insertTree(int key, NodeLocation *nodeLoc) {
 	find(key, nodeLoc, root, root, root->keyPtr);
 	Node *pred = nodeLoc->pred;
 	Node *curr = nodeLoc->curr;
@@ -111,19 +158,19 @@ bool insert(int key, NodeLocation *nodeLoc) {
 				return true;
 			}
 			else
-				return insert(key, nodeLoc);
+				return insertTree(key, nodeLoc);
 		}	
 		else if ((predStat == MARKED) || (predStat == PROMOTE)) {
 			markChildNode(pred, 1-lr, MARKED, true, predKey);
 			removeNode(pred->bl, pred, predKey);
-			return insert(key, nodeLoc);
+			return insertTree(key, nodeLoc);
 		}
 	}
 	else {
 		int *currKeyPtr = GETADDR(curr)->keyPtr;
 		int currKey = GETKEY(currKeyPtr);
 		if (key != currKey) {
-			return insert(key, nodeLoc);
+			return insertTree(key, nodeLoc);
 		}
 		else
 			return false;
@@ -411,7 +458,7 @@ void testbench() {
 		insLoc[i] = (NodeLocation *)malloc(sizeof(NodeLocation));
 	}
 	for(int i=0;i<numThreads;i++)
-		insT[i] = std::thread(&insert, arr[i], insLoc[i]); 
+		insT[i] = std::thread(&insertTree, arr[i], insLoc[i]); 
 	for(int i=0;i<numThreads;i++)
 		insT[i].join(); 
 //	for (int i = 0; i < numThreads; i++) 
@@ -422,20 +469,152 @@ void testbench() {
 	for(int i=0;i<numThreads;i++) {
 		remLoc[i] = (NodeLocation *)malloc(sizeof(NodeLocation));
 	}
-	for(int i=0;i<numThreads;i++)
-		remT[i] = std::thread(&removeTree, arr[i], remLoc[i]); 
+//	for(int i=0;i<numThreads;i++)
+//		remT[i] = std::thread(&removeTree, arr[i], remLoc[i]); 
 		//pthread_create(&remT[i], NULL, removeTree, arr[i], remLoc[i], root, root);
-	for(int i=0;i<numThreads;i++)
-		remT[i].join(); 
+//	for(int i=0;i<numThreads;i++)
+//		remT[i].join(); 
 		//pthread_join(remT[i], NULL);
 	printTree(root->child[LEFT]);
 }
 
-int main(void) {
+
+
+void *operateOnTree(void* tArgs)
+{
+  int chooseOperation;
+  unsigned long lseed;
+	unsigned long key;
+  struct NodeLocation* tData = (struct NodeLocation*) tArgs;
+  const gsl_rng_type* T;
+  gsl_rng* r;
+  gsl_rng_env_setup();
+  T = gsl_rng_default;
+  r = gsl_rng_alloc(T);
+	lseed = tData->lseed;
+  gsl_rng_set(r,lseed);
+
+  while(!start)
+  {
+  }
+	while(!steadyState)
+	{
+	  chooseOperation = gsl_rng_uniform(r)*100;
+		key = gsl_rng_uniform_int(r,range) + 2;
+    if(chooseOperation < searchPer)
+    {
+      searchTree(key, tData);
+    }
+    else if (chooseOperation < insertPer)
+    {
+      insertTree(key, tData);
+    }
+    else
+    {
+      removeTree(key, tData);
+    }
+	}
+	
+	tData->insertCount = 0;
+	tData->deleteCount = 0;
+	tData->searchCount = 0;	
+	while(!stop)
+  {
+    chooseOperation = gsl_rng_uniform(r)*100;
+		key = gsl_rng_uniform_int(r,range); 
+	
+    if (chooseOperation < searchPer)
+    {
+			tData->searchCount++;
+      searchTree(key, tData);
+    }
+    else if (chooseOperation < insertPer)
+    {
+      	insertTree(key, tData);
+			tData->insertCount++;
+    }
+    else
+    {
+      removeTree(key, tData);
+		tData->deleteCount++;
+    }
+  }
+  return NULL;
+}
+
+int main(int argc, char **argv) {
 	root->keyPtr = (int *)malloc(sizeof(int));
 	*(root->keyPtr) = INT_MAX;
 	root->child[LEFT] = (Node *)0x04;
 	root->child[RIGHT] = (Node *)0x04;
-	testbench();
+	//testbenchSyncro();
+	struct timespec runTime, transientTime;
+	unsigned long lseed;
+	numThreads = atoi(argv[1]);
+	searchPer = atoi(argv[2]);
+	insertPer = searchPer + atoi(argv[3]);
+	removePer = insertPer + atoi(argv[4]);
+
+	runTime.tv_sec = atoi(argv[5]);
+	runTime.tv_nsec = 0;
+	transientTime.tv_sec = 0;
+	transientTime.tv_nsec = 2000000;
+
+	range = (unsigned long) atol(argv[6]) - 1;
+	lseed = (unsigned long)atol(argv[7]);
+
+  const gsl_rng_type* T;
+  gsl_rng* r;
+  gsl_rng_env_setup();
+  T = gsl_rng_default;
+  r = gsl_rng_alloc(T);
+  gsl_rng_set(r,lseed);
+	//testbench();
+	
+	NodeLocation *initialInsertArgs = (NodeLocation *)malloc(sizeof(NodeLocation));
+	initialInsertArgs->insertCount = 0;
+	initialInsertArgs->deleteCount = 0;
+	initialInsertArgs->searchCount = 0;
+	
+	int i = 0;
+	while(i < range/2) {
+		if (insertTree(gsl_rng_uniform_int(r,range), initialInsertArgs))
+			i++;
+	}
+	NodeLocation **tArgs = (struct NodeLocation**)malloc(numThreads * sizeof(struct NodeLocation*));
+	for (int i = 0; i < numThreads; i++) {
+		tArgs[i] = (struct NodeLocation *)malloc(sizeof(NodeLocation));
+		tArgs[i]->tid = i;
+		tArgs[i]->lseed = gsl_rng_get(r);
+		tArgs[i]->insertCount = 0;
+		tArgs[i]->deleteCount = 0;
+		tArgs[i]->searchCount = 0;
+	}
+	pthread_t threadArray[numThreads];
+	for(int i=0;i<numThreads;i++)
+	{
+		pthread_create(&threadArray[i], NULL, operateOnTree, (void*) tArgs[i] );
+	}	
+		start=true; 										//start operations
+	//nanosleep(&transientTime,NULL); //warmup
+	sleep(.01);
+	steadyState=true;
+	nanosleep(&runTime,NULL);
+	stop=true;		
+	
+	for(int i=0;i<numThreads;i++)
+		pthread_join(threadArray[i], NULL);
+
+	unsigned long totalInsertCount = 0;
+	unsigned long totalRemoveCount = 0;
+	unsigned long totalSearchCount = 0;
+	for(int i=0;i<numThreads;i++) {
+		totalInsertCount += tArgs[i]->insertCount;
+		totalRemoveCount += tArgs[i]->deleteCount;
+		totalSearchCount += tArgs[i]->searchCount;
+	}
+	unsigned long totalOperations = totalSearchCount + totalInsertCount + totalRemoveCount;
+	double MOPS = totalOperations/(runTime.tv_sec*1000000.0);
+	printf("Through Put is : %f\n", MOPS);
 	return 0;
 }
